@@ -1,0 +1,3 @@
+scipy
+scikit-image
+affine==2.3.0
