@@ -24,12 +24,6 @@ try:
     _HAS_SKIMAGE = True
 except:
     _HAS_SKIMAGE = False
-# try:
-#     import rasterio
-#     import rasterio.features
-#     _HAS_RASTERIO = True
-# except:
-#     _HAS_RASTERIO = False
 
 from osgeo import gdal, ogr
 
@@ -564,9 +558,9 @@ class Grid(object):
                           If False, require a valid affine transform and crs.
         """
         # Filter warnings due to invalid values
-        np.warnings.filterwarnings(action='ignore', message='The default mode',
+        warnings.filterwarnings(action='ignore', message='The default mode',
                                    category=UserWarning)
-        np.warnings.filterwarnings(action='ignore', message='Anti-aliasing',
+        warnings.filterwarnings(action='ignore', message='Anti-aliasing',
                                    category=UserWarning)
         nodata_in = self._check_nodata_in(data, nodata_in)
         if isinstance(data, str):
@@ -736,8 +730,8 @@ class Grid(object):
                     pits=-1, flats=-1, dirmap=(64, 128, 1, 2, 4, 8, 16, 32), inplace=True,
                     as_crs=None, apply_mask=True, ignore_metadata=False, properties={},
                     metadata={}, **kwargs):
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
-                                   category=RuntimeWarning)
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+                                    category=RuntimeWarning)
         try:
             # Make sure nothing flows to the nodata cells
             dem.flat[dem_mask] = dem.max() + 1
@@ -786,8 +780,8 @@ class Grid(object):
                       as_crs=None, apply_mask=True, ignore_metadata=False, properties={},
                       metadata={}, **kwargs):
         # Filter warnings due to invalid values
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
-                                   category=RuntimeWarning)
+        # warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+        #                            category=RuntimeWarning)
         try:
             # Make sure nothing flows to the nodata cells
             dem.flat[dem_mask] = dem.max() + 1
@@ -848,6 +842,106 @@ class Grid(object):
         return self._output_handler(data=fdir_out, out_name=out_name, properties=properties,
                                     inplace=inplace, metadata=metadata)
 
+    def flowdir_strbrn(self, data, out_name='dir', nodata_in=None, nodata_out=None,
+                pits=-1, flats=-1, dirmap=(64, 128, 1, 2, 4, 8, 16, 32), routing='d8',
+                inplace=True, as_crs=None, apply_mask=True, ignore_metadata=False,
+                **kwargs):
+        """
+        Generates a flow direction grid from a DEM grid.
+ 
+        Parameters
+        ----------
+        data : str or Raster
+               DEM data.
+               If str: name of the dataset to be viewed.
+               If Raster: a Raster instance (see pysheds.view.Raster)
+        out_name : string
+                   Name of attribute containing new flow direction array.
+        nodata_in : int or float
+                     Value to indicate nodata in input array.
+        nodata_out : int or float
+                     Value to indicate nodata in output array.
+        pits : int
+               Value to indicate pits in output array.
+        flats : int
+                Value to indicate flat areas in output array.
+        dirmap : list or tuple (length 8)
+                 List of integer values representing the following
+                 cardinal and intercardinal directions (in order):
+                 [N, NE, E, SE, S, SW, W, NW]
+        inplace : bool
+                  If True, write output array to self.<out_name>.
+                  Otherwise, return the output array.
+        as_crs : pyproj.Proj instance
+                 CRS projection to use when computing slopes.
+        apply_mask : bool
+               If True, "mask" the output using self.mask.
+        ignore_metadata : bool
+                          If False, require a valid affine transform and crs.
+        """
+        dirmap = self._set_dirmap(dirmap, data)
+        nodata_in = self._check_nodata_in(data, nodata_in)
+        properties = {'nodata' : nodata_out}
+        metadata = {'dirmap' : dirmap}
+        dem = self._input_handler(data, apply_mask=apply_mask, nodata_view=nodata_in,
+                                  properties=properties, ignore_metadata=ignore_metadata,
+                                  **kwargs)
+        if nodata_in is None:
+            dem_mask = np.array([]).astype(int)
+        else:
+            if np.isnan(nodata_in):
+                dem_mask = np.where(np.isnan(dem.ravel()))[0]
+            else:
+                dem_mask = np.where(dem.ravel() == nodata_in)[0]
+
+        if nodata_out is None:
+                nodata_out = 0
+
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+                                    category=RuntimeWarning)
+        try:
+            # Make sure nothing flows to the nodata cells
+            dem.flat[dem_mask] = dem.max() + 1
+            inside = self._inside_indices(dem, mask=dem_mask)
+            inner_neighbors, diff, fdir_defined = self._d8_diff(dem, inside)
+            # Optionally, project DEM before computing slopes
+            if as_crs is not None:
+                indices = np.vstack(np.dstack(np.meshgrid(
+                                    *self.grid_indices(affine=dem.affine, shape=dem.shape),
+                                    indexing='ij')))
+                # TODO: Should probably use dataset crs instead of instance crs
+                indices = self._convert_grid_indices_crs(indices, dem.crs, as_crs)
+                y_sur = indices[:,0].flat[inner_neighbors]
+                x_sur = indices[:,1].flat[inner_neighbors]
+                dy = indices[:,0].flat[inside] - y_sur
+                dx = indices[:,1].flat[inside] - x_sur
+                cell_dists = np.sqrt(dx**2 + dy**2)
+            else:
+                dx = abs(dem.affine.a)
+                dy = abs(dem.affine.e)
+                ddiag = np.sqrt(dx**2 + dy**2)
+                cell_dists = (np.array([dy, ddiag, dx, ddiag, dy, ddiag, dx, ddiag])
+                            .reshape(-1, 1))
+            slope = diff / cell_dists
+            # TODO: This assigns directions arbitrarily if multiple steepest paths exist
+            fdir = np.where(fdir_defined, np.argmax(slope, axis=0), -1) + 1
+            # If direction numbering isn't default, convert values of output array.
+            if dirmap != (1, 2, 3, 4, 5, 6, 7, 8):
+                fdir = np.asarray([0] + list(dirmap))[fdir]
+            pits_bool = (diff < 0).all(axis=0)
+            flats_bool = (~fdir_defined & ~pits_bool)
+            fdir[pits_bool] = pits
+            fdir[flats_bool] = flats
+            fdir_out = np.full(dem.shape, nodata_out)
+            fdir_out.flat[inside] = fdir
+        except:
+            raise
+        finally:
+            if nodata_in is not None:
+                dem.flat[dem_mask] = nodata_in
+        return self._output_handler(data=fdir_out, out_name=out_name, properties=properties,
+                                    inplace=inplace, metadata=metadata)
+ 
     def facet_flow(self, e0, e1, e2, d1=1, d2=1):
         s1 = (e0 - e1)/d1
         s2 = (e1 - e2)/d2
@@ -1011,7 +1105,7 @@ class Grid(object):
                         inplace=True, apply_mask=True, ignore_metadata=False, properties={},
                         metadata={}, **kwargs):
         # Filter warnings due to invalid values
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
                                    category=RuntimeWarning)
         # Vectorized Recursive algorithm:
         # for each cell j, recursively search through grid to determine
@@ -1341,7 +1435,7 @@ class Grid(object):
                            out_name='acc', inplace=True, pad=False, apply_mask=True,
                            ignore_metadata=False, properties={}, metadata={}, **kwargs):
         # Filter warnings due to invalid values
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
                                    category=RuntimeWarning)
         # Pad the rim
         if pad:
@@ -1659,7 +1753,7 @@ class Grid(object):
                             xytype='index', apply_mask=True, ignore_metadata=False,
                             properties={}, metadata={}, **kwargs):
         # Filter warnings due to invalid values
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
                                    category=RuntimeWarning)
         # Construct flat index onto flow direction array
         mintype = np.min_scalar_type(fdir.size)
@@ -2046,10 +2140,10 @@ class Grid(object):
         # TODO: This will overwrite metadata if provided
         metadata = {'dirmap' : dirmap}
         # initialize array to collect catchment cells
-        fdem = self._input_handler(fdem, apply_mask=apply_mask, nodata_view=nodata_in_fdem,
+        fdem = self._input_handler(fdem, apply_mask=apply_mask, nodata_view=np.nan,
                                    properties=properties, ignore_metadata=ignore_metadata,
                                    **kwargs)
-        dem = self._input_handler(dem, apply_mask=apply_mask, nodata_view=nodata_in_dem,
+        dem = self._input_handler(dem, apply_mask=apply_mask, nodata_view=np.nan,
                                   properties=properties, ignore_metadata=ignore_metadata,
                                   **kwargs)
         mask = self._input_handler(drainage_mask, apply_mask=False, nodata_view=0,
@@ -2061,18 +2155,20 @@ class Grid(object):
         assert (np.asarray(dem.shape) == np.asarray(fdem.shape)).all()
         assert (np.asarray(dem.shape) == np.asarray(mask.shape)).all()
         
+        ddsum = int(fdem[~np.isnan(fdem)].size / mask[mask==1].size * 100) # value for max number of iterations in loop
+        
         if routing.lower() == 'd8':
             try:
-                fdemleft, fdemright, fdemtop, fdembottom = self._pop_rim(fdem, nodata=nodata_in_dem)
-                demleft, demright, demtop, dembottom = self._pop_rim(dem, nodata=nodata_in_dem)
+                fdemleft, fdemright, fdemtop, fdembottom = self._pop_rim(fdem, nodata=np.nan)
+                demleft, demright, demtop, dembottom = self._pop_rim(dem, nodata=np.nan)
                 maskleft, maskright, masktop, maskbottom = self._pop_rim(mask, nodata=0)
                 mask = mask.ravel()
                 source = np.flatnonzero(mask)
-                hand = -np.ones(dem.size, dtype=int)
+                hand = -np.ones(fdem.size, dtype=int)
                 hand[source] = source
-                for _ in range(dem.size):
+                for _ in range(ddsum):
                     selection = self._select_surround_ravel(source, fdem.shape)
-                    ix = (hand.flat[selection] < 0) & np.isfinite(dem.flat[selection]) & (edges.flat[selection]==0) # neighbour cells not assigned
+                    ix = (hand.flat[selection] < 0) & np.isfinite(fdem.flat[selection]) & (edges.flat[selection]==0) # neighbour cells not assigned
                     if (not source.size) | np.array_equal(source, np.unique(selection[ix])):
                         break
                     source = np.unique(selection[ix])
@@ -2147,7 +2243,7 @@ class Grid(object):
         # TODO: This will overwrite metadata if provided
         metadata = {'dirmap' : dirmap}
         # initialize array to collect catchment cells
-        fdem = self._input_handler(fdem, apply_mask=apply_mask, nodata_view=nodata_in_fdem,
+        fdem = self._input_handler(fdem, apply_mask=apply_mask, nodata_view=np.nan,
                                    properties=properties, ignore_metadata=ignore_metadata,
                                    **kwargs)
         mask = self._input_handler(drainage_mask, apply_mask=False, nodata_view=0,
@@ -2157,6 +2253,8 @@ class Grid(object):
                                    properties=properties, ignore_metadata=ignore_metadata,
                                    **kwargs)
         assert (np.asarray(fdem.shape) == np.asarray(mask.shape)).all()
+        
+        ddsum = int(fdem[~np.isnan(fdem)].size / mask[mask==1].size * 100) # value for max number of iterations in loop
         
         # Distance params
         as_crs=pyproj.Proj("esri:102032")
@@ -2177,7 +2275,7 @@ class Grid(object):
                 source = np.flatnonzero(mask)
                 ltnd = -np.ones(fdem.size, dtype=int)
                 ltnd[source] = 0
-                for _ in range(fdem.size):
+                for _ in range(ddsum):
                     selection = self._select_surround_ravel(source, fdem.shape)
                     ix = (ltnd.flat[selection] < 0) & np.isfinite(fdem.flat[selection]) & (edges.flat[selection]==0) # neighbour cells not assigned
                     if (not source.size) | np.array_equal(source, np.unique(selection[ix])):
@@ -2446,9 +2544,9 @@ class Grid(object):
                           If False, require a valid affine transform and CRS.
         """
         # Filter warnings due to invalid values
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
                                    category=RuntimeWarning)
-        np.warnings.filterwarnings(action='ignore', message='divide by zero',
+        warnings.filterwarnings(action='ignore', message='divide by zero',
                                    category=RuntimeWarning)
         if routing.lower() != 'd8':
             raise NotImplementedError('Only implemented for D8 routing.')
@@ -3619,7 +3717,7 @@ class Grid(object):
         return drainage_grad, flats, high_edge_cells, low_edge_cells, labels, diff
 
     def _d8_diff(self, dem, inside):
-        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+        warnings.filterwarnings(action='ignore', message='Invalid value encountered',
                                    category=RuntimeWarning)
         inner_neighbors = self._select_surround_ravel(inside, dem.shape).T
         inner_neighbors_elev = dem.flat[inner_neighbors]
@@ -3654,7 +3752,7 @@ class Grid(object):
                           If False, require a valid affine transform and CRS.
         """
         # handle nodata values in dem
-        np.warnings.filterwarnings(action='ignore', message='All-NaN axis encountered',
+        warnings.filterwarnings(action='ignore', message='All-NaN axis encountered',
                                    category=RuntimeWarning)
         nodata_in = self._check_nodata_in(data, nodata_in)
         if nodata_out is None:
