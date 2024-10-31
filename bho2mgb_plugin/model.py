@@ -470,6 +470,7 @@ def dissolver(df, by, outfn, geomtype):
     
     dissolve_geom = load_df(out_dissolve_geom).sort_values(by=by).reset_index()
     dfagg['geometry'] = dissolve_geom['geometry']
+    dfagg = dfagg.sort_values(by='cobacia').reset_index(drop=True)
     out_dissolve_df =  os.path.join(current_dir, outfn)
     save_df(dfagg, out_dissolve_df, geomtype)
     
